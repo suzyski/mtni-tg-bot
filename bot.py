@@ -81,12 +81,12 @@ ALLOWED_ORDER_STATUSES = [
     "Cancelled",
 ]
 
-MENU_REGEX = r"^(➕ New Order|📋 Active Orders|📋 Pending Orders|Pending Orders|📊 Summary|Summary|✈️ Cargo Batches|📦 Batch Status|Batch Status)$"
+MENU_REGEX = r"(?i)^(➕\s*New Order|New Order|📋\s*Pending Orders|Pending Orders|📋\s*Active Orders|Active Orders|📊\s*Summary|Summary|✈️\s*Cargo Batches|Cargo Batches|📦\s*Batch Status|Batch Status|Batches)$"
 
 def get_main_menu_keyboard():
     keyboard = [
-        ["➕ New Order", "📋 Active Orders"],
-        ["📊 Summary", "✈️ Cargo Batches"],
+        ["📋 Pending Orders", "📊 Summary"],
+        ["➕ New Order", "📦 Batch Status"],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -858,8 +858,8 @@ async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        ["➕ New Order", "📋 Active Orders"],
-        ["📊 Summary", "✈️ Cargo Batches"],
+        ["📋 Pending Orders", "📊 Summary"],
+        ["➕ New Order", "📦 Batch Status"],
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     welcome_text = (
@@ -882,17 +882,19 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    raw_text = update.message.text.strip() if update.message and update.message.text else ""
+    text = raw_text.lower()
     context.user_data.clear()
-    if text in ("➕ New Order", "New Order"):
+
+    if "new order" in text or "➕" in text:
         return await start_order(update, context)
-    elif text in ("📋 Active Orders", "📋 Pending Orders", "Pending Orders"):
+    elif "pending" in text or "active" in text or ("order" in text and "new" not in text):
         return await pending_orders_command(update, context)
-    elif text in ("📊 Summary", "Summary"):
+    elif "summary" in text or "📊" in text:
         return await summary_command(update, context)
-    elif text in ("✈️ Cargo Batches", "📦 Batch Status", "Batch Status"):
+    elif "batch" in text or "cargo" in text or "📦" in text or "✈️" in text:
         return await batches_list_command(update, context)
-    elif text in ("❌ Cancel", "❌ Cancel Order Intake"):
+    elif "cancel" in text or "❌" in text:
         return await cancel_conv(update, context)
 
 
@@ -989,23 +991,19 @@ def main():
     app.add_handler(order_conv)
     app.add_handler(batch_conv)
 
-    # Command Handlers
-    app.add_handler(CommandHandler("start", start_menu))
-    app.add_handler(CommandHandler("menu", start_menu))
+    # Command Handlers with aliases
+    app.add_handler(CommandHandler(["start", "menu"], start_menu))
     app.add_handler(CommandHandler("id", get_my_id))
     app.add_handler(CommandHandler("order", get_order))
-    app.add_handler(CommandHandler("pending", pending_orders_command))
+    app.add_handler(CommandHandler(["pending", "orders", "active"], pending_orders_command))
     app.add_handler(CommandHandler("summary", summary_command))
-    app.add_handler(CommandHandler("batches", batches_list_command))
-    app.add_handler(CommandHandler("batchstatus", batchstatus_command))
+    app.add_handler(CommandHandler(["batches", "batchstatus"], batches_list_command))
     app.add_handler(CommandHandler("updatestatus", update_status_command))
     app.add_handler(CommandHandler("cancelorder", cancel_order_command))
     app.add_handler(CommandHandler("editdeposit", editdeposit_command))
 
-    # Menu text buttons
-    app.add_handler(
-        MessageHandler(filters.Regex("^(➕ New Order|📋 Active Orders|📊 Summary|✈️ Cargo Batches)$"), handle_menu_text)
-    )
+    # Menu text buttons matching MENU_REGEX
+    app.add_handler(MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text))
 
     # Callback handlers
     app.add_handler(CallbackQueryHandler(handle_card_callbacks, pattern="^(card_|setstage_|bstatus_)"))
