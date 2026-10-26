@@ -81,13 +81,17 @@ ALLOWED_ORDER_STATUSES = [
     "Cancelled",
 ]
 
-ALLOWED_BATCH_STATUSES = [
-    "Departed SG",
-    "In Transit",
-    "Arrived Myanmar",
-    "Out for Delivery",
-    "Completed",
-]
+MENU_REGEX = r"^(➕ New Order|📋 Active Orders|📋 Pending Orders|Pending Orders|📊 Summary|Summary|✈️ Cargo Batches|📦 Batch Status|Batch Status)$"
+
+def get_main_menu_keyboard():
+    keyboard = [
+        ["➕ New Order", "📋 Active Orders"],
+        ["📊 Summary", "✈️ Cargo Batches"],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_cancel_keyboard():
+    return ReplyKeyboardMarkup([["❌ Cancel Order Intake"]], resize_keyboard=True)
 
 # ---------------------------------------------------------------------------
 # Utility Functions
@@ -196,7 +200,8 @@ async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.clear()
     await update.message.reply_text(
-        "🍸 **25 Martini — New Order Intake**\n\n👤 What is the Customer's Name?\n(Type /cancel anytime to exit)",
+        "🍸 **25 Martini — New Order Intake**\n\n👤 What is the Customer's Name?\n(Type /cancel or tap Cancel below to exit)",
+        reply_markup=get_cancel_keyboard(),
         parse_mode="Markdown"
     )
     return NAME
@@ -398,7 +403,9 @@ async def handle_order_confirmation(update: Update, context: ContextTypes.DEFAUL
 
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("❌ Action cancelled.")
+    msg = update.effective_message
+    if msg:
+        await msg.reply_text("❌ Action cancelled. Returning to main menu.", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
 
 
@@ -876,14 +883,17 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text == "➕ New Order":
+    context.user_data.clear()
+    if text in ("➕ New Order", "New Order"):
         return await start_order(update, context)
-    elif text == "📋 Active Orders":
+    elif text in ("📋 Active Orders", "📋 Pending Orders", "Pending Orders"):
         return await pending_orders_command(update, context)
-    elif text == "📊 Summary":
+    elif text in ("📊 Summary", "Summary"):
         return await summary_command(update, context)
-    elif text == "✈️ Cargo Batches":
+    elif text in ("✈️ Cargo Batches", "📦 Batch Status", "Batch Status"):
         return await batches_list_command(update, context)
+    elif text in ("❌ Cancel", "❌ Cancel Order Intake"):
+        return await cancel_conv(update, context)
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +960,11 @@ def main():
                 CallbackQueryHandler(handle_order_confirmation, pattern="^(confirm_order|cancel_order_entry)$")
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_conv)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_conv),
+            MessageHandler(filters.Regex(r"^(❌ Cancel|❌ Cancel Order Intake|(?i)/cancel)$"), cancel_conv),
+            MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text),
+        ],
         allow_reentry=True,
         per_message=False,
     )
@@ -963,7 +977,11 @@ def main():
             BATCH_HAWB: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_hawb)],
             BATCH_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_order_selection)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_conv)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_conv),
+            MessageHandler(filters.Regex(r"^(❌ Cancel|❌ Cancel Order Intake|(?i)/cancel)$"), cancel_conv),
+            MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text),
+        ],
         allow_reentry=True,
         per_message=False,
     )
