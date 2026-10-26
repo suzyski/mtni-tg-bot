@@ -964,7 +964,7 @@ def main():
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conv),
-            MessageHandler(filters.Regex(r"^(❌ Cancel|❌ Cancel Order Intake|(?i)/cancel)$"), cancel_conv),
+            MessageHandler(filters.Regex(r"(?i)^(❌ Cancel|❌ Cancel Order Intake|/cancel)$"), cancel_conv),
             MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text),
         ],
         allow_reentry=True,
@@ -981,7 +981,7 @@ def main():
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conv),
-            MessageHandler(filters.Regex(r"^(❌ Cancel|❌ Cancel Order Intake|(?i)/cancel)$"), cancel_conv),
+            MessageHandler(filters.Regex(r"(?i)^(❌ Cancel|❌ Cancel Order Intake|/cancel)$"), cancel_conv),
             MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text),
         ],
         allow_reentry=True,
