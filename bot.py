@@ -148,6 +148,7 @@ def set_lastmile_fee(fee: float) -> bool:
 # ---------------------------------------------------------------------------
 NAME, CONTACT, ITEMS, PRICE, DEPOSIT, AREA, CONFIRMATION = range(7)
 BATCH_SHIP_DATE, BATCH_HAWB, BATCH_ORDERS = range(7, 10)
+CALC_PRICE, CALC_WEIGHT, CALC_FX = range(10, 13)
 
 ALLOWED_ORDER_STATUSES = [
     "Inquiry",
@@ -158,17 +159,21 @@ ALLOWED_ORDER_STATUSES = [
     "Cancelled",
 ]
 
-MENU_REGEX = r"(?i)^(➕\s*New Order|New Order|📋\s*Pending Orders|Pending Orders|📋\s*Active Orders|Active Orders|📊\s*Summary|Summary|✈️\s*Cargo Batches|Cargo Batches|📦\s*Batch Status|Batch Status|Batches)$"
+MENU_REGEX = r"(?i)^(➕\s*New Order|New Order|📋\s*Pending Orders|Pending Orders|📋\s*Active Orders|Active Orders|📊\s*Summary|Summary|✈️\s*Cargo Batches|Cargo Batches|📦\s*Batch Status|Batch Status|Batches|🧮\s*Calculator|Calculator|💱\s*Live Pricing|Live Pricing)$"
 
 def get_main_menu_keyboard():
     keyboard = [
         ["📋 Pending Orders", "📊 Summary"],
-        ["➕ New Order", "📦 Batch Status"],
+        ["➕ New Order", "🧮 Calculator"],
+        ["📦 Batch Status", "💱 Live Pricing"],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_cancel_keyboard():
     return ReplyKeyboardMarkup([["❌ Cancel Order Intake"]], resize_keyboard=True)
+
+def get_cancel_calc_keyboard():
+    return ReplyKeyboardMarkup([["❌ Cancel Calculation"]], resize_keyboard=True)
 
 # ---------------------------------------------------------------------------
 # Utility Functions
@@ -868,6 +873,199 @@ async def handle_order_selection(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
+# ---------------------------------------------------------------------------
+# Sourcing & Feasibility Calculator Wizard (/calc)
+# ---------------------------------------------------------------------------
+async def start_calc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for /calc step-by-step sourcing calculator wizard."""
+    if not is_admin(update):
+        await update.message.reply_text("⛔ Access Denied.")
+        return ConversationHandler.END
+
+    if not is_allowed_topic(update):
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ /calc can only be used inside the designated **Bot Channel** topic.",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode="Markdown"
+            )
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    msg = (
+        "🧮 **25 Martini — Sourcing & Feasibility Calculator**\n"
+        "*(Check if a Singapore item is worth selling before committing)*\n\n"
+        "🏷️ **Step 1/3:** What is the retail purchase price in Singapore Dollars (SGD)?\n"
+        "*(e.g. `189`, `79`, `45.50`)*\n\n"
+        "(Tap Cancel below at any time to exit)"
+    )
+    if update.message:
+        await update.message.reply_text(msg, reply_markup=get_cancel_calc_keyboard(), parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(msg, reply_markup=get_cancel_calc_keyboard(), parse_mode="Markdown")
+    return CALC_PRICE
+
+
+async def receive_calc_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    price = clean_float(text)
+    if price <= 0:
+        await update.message.reply_text("⚠️ Please enter a valid positive number for retail price in SGD (e.g. `189`):")
+        return CALC_PRICE
+
+    context.user_data["calc_price"] = price
+
+    keyboard = [
+        [
+            InlineKeyboardButton("💄 Lipstick / Balm (0.09kg)", callback_data="cweight_0.09"),
+            InlineKeyboardButton("🧴 Serum / Cream (0.28kg)", callback_data="cweight_0.28")
+        ],
+        [
+            InlineKeyboardButton("🌿 Essence / Toner (0.45kg)", callback_data="cweight_0.45"),
+            InlineKeyboardButton("🌸 Perfume 100ml (0.45kg)", callback_data="cweight_0.45")
+        ],
+        [
+            InlineKeyboardButton("👜 Dumpling Bag (0.30kg)", callback_data="cweight_0.30"),
+            InlineKeyboardButton("🎒 Tote / Leather Bag (0.65kg)", callback_data="cweight_0.65")
+        ]
+    ]
+    await update.message.reply_text(
+        f"🏷️ Purchase Price set to **S${price:,.2f}**.\n\n"
+        "⚖️ **Step 2/3:** Select the product category below (or type custom gross weight in kg, e.g. `0.35`):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return CALC_WEIGHT
+
+
+async def _prompt_calc_fx(weight: float, context: ContextTypes.DEFAULT_TYPE, reply_target, is_callback: bool = False):
+    context.user_data["calc_weight"] = weight
+    active_fx = get_current_fx_rate()
+    context.user_data["active_fx"] = active_fx
+
+    keyboard = [
+        [
+            InlineKeyboardButton(f"✅ Use Active Ledger Rate ({active_fx:,.0f} MMK)", callback_data=f"cfx_{active_fx}")
+        ],
+        [
+            InlineKeyboardButton(f"🧪 Test {active_fx + 100:,.0f} (+100)", callback_data=f"cfx_{active_fx + 100}"),
+            InlineKeyboardButton(f"🧪 Test {active_fx - 100:,.0f} (-100)", callback_data=f"cfx_{active_fx - 100}")
+        ]
+    ]
+    prompt = (
+        f"⚖️ Gross Weight set to **{weight:.2f} kg**.\n\n"
+        f"💱 **Step 3/3:** Choose Exchange Rate to evaluate (or type custom MMK rate, e.g. `3450`):"
+    )
+    if is_callback:
+        await reply_target.edit_message_text(prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        await reply_target.reply_text(prompt, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return CALC_FX
+
+
+async def receive_calc_weight_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    weight_str = query.data.replace("cweight_", "")
+    weight = float(weight_str)
+    return await _prompt_calc_fx(weight, context, query, is_callback=True)
+
+
+async def receive_calc_weight_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    weight = clean_float(text)
+    if weight <= 0 or weight > 50:
+        await update.message.reply_text("⚠️ Please enter a reasonable gross weight in kg (e.g. `0.35`):")
+        return CALC_WEIGHT
+    return await _prompt_calc_fx(weight, context, update.message, is_callback=False)
+
+
+async def _render_calc_result(fx_rate: float, context: ContextTypes.DEFAULT_TYPE, target, is_callback: bool = False):
+    data = context.user_data
+    price_sgd = data.get("calc_price", 0.0)
+    weight_kg = data.get("calc_weight", 0.3)
+
+    cargo_rate = get_cargo_rate()
+    markup_pct = get_service_markup()
+    lastmile_mmk = get_lastmile_fee()
+    lastmile_sgd = round(lastmile_mmk / fx_rate, 2)
+
+    cargo_sgd = round((weight_kg * cargo_rate) + lastmile_sgd, 2)
+    profit_sgd = round((price_sgd + cargo_sgd) * (markup_pct / 100.0), 2)
+    landed_sgd = round(price_sgd + cargo_sgd + profit_sgd, 2)
+    landed_mmk = int(round(landed_sgd * fx_rate, -2))
+    profit_mmk = int(round(profit_sgd * fx_rate, -2))
+    cargo_ratio_pct = round((cargo_sgd / price_sgd) * 100, 1) if price_sgd else 0
+
+    # Sourcing Feasibility Verdict ("Should Sell or Not")
+    if cargo_ratio_pct > 35:
+        verdict = (
+            "🔴 **NOT RECOMMENDED / CARGO HEAVY**\n"
+            f"⚠️ Air freight (S${cargo_sgd:,.2f}) takes {cargo_ratio_pct}% of the retail price. "
+            "The landed MMK price may feel disproportionately expensive compared to the item's store value."
+        )
+    elif profit_sgd >= 20 or (profit_sgd >= 8 and cargo_ratio_pct <= 15):
+        verdict = (
+            "🟢 **HIGHLY RECOMMENDED TO SELL**\n"
+            f"✨ Strong profit (+{profit_mmk:,} MMK) with low cargo overhead ({cargo_ratio_pct}%). "
+            "Excellent candidate for daily VIP drops!"
+        )
+    else:
+        verdict = (
+            "🟡 **MODERATE VIABILITY**\n"
+            f"ℹ️ Fair margin (+{profit_mmk:,} MMK). Viable for VIP customer pre-orders or bundled multi-item shipments."
+        )
+
+    card_text = (
+        "🧮 **25 MARTINI — SOURCING FEASIBILITY ANALYSIS**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🛒 **Purchase Cost:** S${price_sgd:,.2f}\n"
+        f"⚖️ **Gross Shipping Weight:** {weight_kg:.2f} kg\n"
+        f"✈️ **Air Cargo Freight:** S${cargo_sgd:,.2f} (at S${cargo_rate:,.2f}/kg + ~{lastmile_mmk:,.0f} MMK last-mile)\n"
+        f"🏷️ **Service Markup ({markup_pct:g}%):** S${profit_sgd:,.2f}\n"
+        "─────────────────────────\n"
+        f"🇸🇬 **Total Landed Cost (SGD):** **S${landed_sgd:,.2f}**\n"
+        f"🇲🇲 **Customer Selling Price:** **{landed_mmk:,} MMK** (@ {fx_rate:,.0f} FX)\n"
+        "─────────────────────────\n"
+        "💰 **Profit Breakdown:**\n"
+        f"• **Net Margin:** **+{profit_mmk:,} MMK** (S${profit_sgd:,.2f})\n"
+        f"• **Profit Share:** {markup_pct:g}%\n"
+        f"• **Cargo Overhead:** {cargo_ratio_pct}% of retail\n\n"
+        f"📊 **SOURCING VERDICT:**\n{verdict}"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔄 Calculate Another", callback_data="recalc"),
+            InlineKeyboardButton("➕ Turn into Order", callback_data="start_order_from_calc")
+        ]
+    ]
+
+    if is_callback:
+        await target.edit_message_text(card_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        await target.reply_text(card_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    return ConversationHandler.END
+
+
+async def receive_calc_fx_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    fx_str = query.data.replace("cfx_", "")
+    fx = float(fx_str)
+    return await _render_calc_result(fx, context, query, is_callback=True)
+
+
+async def receive_calc_fx_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    fx = clean_float(text)
+    if fx < 1000 or fx > 10000:
+        await update.message.reply_text("⚠️ Please enter a reasonable FX rate between 1,000 and 10,000 MMK:")
+        return CALC_FX
+    return await _render_calc_result(fx, context, update.message, is_callback=False)
+
+
 async def batchstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lookup or update batch status."""
     if not is_admin(update):
@@ -1013,6 +1211,40 @@ async def handle_card_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
+    if data.startswith("cfgconfirm_"):
+        parts = data.split("_")
+        param = parts[1]
+        val = float(parts[2])
+        labels = {
+            "fx": (set_current_fx_rate, "Operational Exchange Rate", f"1 SGD = {val:,.0f} MMK"),
+            "cargo": (set_cargo_rate, "Air Cargo Freight Rate", f"S${val:,.2f} / kg"),
+            "markup": (set_service_markup, "Service Markup", f"{val:g}%"),
+            "lastmile": (set_lastmile_fee, "Yangon Last-Mile Buffer", f"{val:,.0f} MMK")
+        }
+        setter_func, label_name, val_disp = labels.get(param, (None, param, str(val)))
+        if setter_func:
+            setter_func(val)
+        await query.edit_message_text(
+            f"✅ **Confirmed & Applied to Ledger!**\n\n"
+            f"• **{label_name}:** **{val_disp}**\n\n"
+            f"✨ All new orders will calculate at this rate.",
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "cfgcancel":
+        await query.edit_message_text(
+            "🚫 **Parameter Update Cancelled**\n\nNo ledger parameters were modified. Existing values remain active.",
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "recalc":
+        return await start_calc(update, context)
+
+    if data == "start_order_from_calc":
+        return await start_order(update, context)
+
 
 # ---------------------------------------------------------------------------
 # Menu & Identity Commands
@@ -1020,15 +1252,12 @@ async def handle_card_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 @require_bot_channel_and_admin
 async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show main keyboard and welcome message."""
-    keyboard = [
-        ["📋 Pending Orders", "📊 Summary"],
-        ["➕ New Order", "📦 Batch Status"],
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = get_main_menu_keyboard()
     welcome_text = (
         "🍸 **25 Martini — Operations Assistant**\n\n"
         "Welcome! All orders and cargo batches are synced live with our Notion Hub.\n\n"
         "• `/neworder` — Take a customer order (7-step guide)\n"
+        "• `/calc` — Step-by-step sourcing & profit calculator (should sell or not)\n"
         "• `/pending` — View active orders in pipeline\n"
         "• `/order [id]` — Look up an order card with action buttons\n"
         "• `/summary` — View business revenue & pipeline metrics\n"
@@ -1086,7 +1315,7 @@ async def fx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_bot_channel_and_admin
 async def setfx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Update the operational SGD to MMK exchange rate."""
+    """Prompt confirmation to update the operational SGD to MMK exchange rate."""
     args = context.args
     if not args:
         current = get_current_fx_rate()
@@ -1105,22 +1334,28 @@ async def setfx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         old_rate = get_current_fx_rate()
-        set_current_fx_rate(new_rate)
-
-        await update.message.reply_text(
-            f"✅ **Operational Exchange Rate Updated!**\n\n"
-            f"• **Previous Rate:** 1 SGD = {old_rate:,.0f} MMK\n"
-            f"• **New Rate:** 1 SGD = **{new_rate:,.0f} MMK**\n\n"
-            f"✨ All future order intakes will calculate at this rate.",
-            parse_mode="Markdown"
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm & Apply", callback_data=f"cfgconfirm_fx_{new_rate}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cfgcancel")
+            ]
+        ]
+        msg = (
+            "⚠️ **CONFIRM EXCHANGE RATE UPDATE FOR LEDGER**\n\n"
+            "• **Parameter:** SGD to MMK Operational Rate\n"
+            f"• **Current Ledger Rate:** 1 SGD = {old_rate:,.0f} MMK\n"
+            f"• **Proposed New Rate:** 1 SGD = **{new_rate:,.0f} MMK**\n\n"
+            "📌 *Notice: Confirming will update the live operational rate used for all new customer order intakes in Notion.*\n\n"
+            "Apply this rate change to the active ledger?"
         )
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Invalid number. Please enter a valid rate, e.g. `/setfx 3450`", parse_mode="Markdown")
 
 
 @require_bot_channel_and_admin
 async def setcargo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Update the operational air cargo rate per kg (in SGD)."""
+    """Prompt confirmation to update the operational air cargo rate per kg (in SGD)."""
     args = context.args
     if not args:
         current = get_cargo_rate()
@@ -1139,22 +1374,28 @@ async def setcargo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         old_rate = get_cargo_rate()
-        set_cargo_rate(new_rate)
-
-        await update.message.reply_text(
-            f"✅ **Air Cargo Rate Updated!**\n\n"
-            f"• **Previous Rate:** S${old_rate:,.2f} / kg\n"
-            f"• **New Rate:** **S${new_rate:,.2f} / kg**\n\n"
-            f"✈️ Air freight calculations for batch orders will use this rate.",
-            parse_mode="Markdown"
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm & Apply", callback_data=f"cfgconfirm_cargo_{new_rate}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cfgcancel")
+            ]
+        ]
+        msg = (
+            "⚠️ **CONFIRM AIR CARGO RATE UPDATE FOR LEDGER**\n\n"
+            "• **Parameter:** Air Cargo Rate (Singapore -> Yangon)\n"
+            f"• **Current Rate:** S${old_rate:,.2f} / kg\n"
+            f"• **Proposed New Rate:** **S${new_rate:,.2f} / kg**\n\n"
+            "📌 *Notice: Confirming will update air freight calculations for incoming cargo batches.*\n\n"
+            "Apply this cargo rate change to the active ledger?"
         )
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Invalid number. Please enter a valid rate, e.g. `/setcargo 18`", parse_mode="Markdown")
 
 
 @require_bot_channel_and_admin
 async def setmarkup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Update the service markup percentage."""
+    """Prompt confirmation to update the service markup percentage."""
     args = context.args
     if not args:
         current = get_service_markup()
@@ -1173,22 +1414,28 @@ async def setmarkup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         old_pct = get_service_markup()
-        set_service_markup(new_pct)
-
-        await update.message.reply_text(
-            f"✅ **Service Markup Updated!**\n\n"
-            f"• **Previous Markup:** {old_pct:g}%\n"
-            f"• **New Markup:** **{new_pct:g}%**\n\n"
-            f"🏷️ Profit margin multiplier updated across pricing calculations.",
-            parse_mode="Markdown"
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm & Apply", callback_data=f"cfgconfirm_markup_{new_pct}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cfgcancel")
+            ]
+        ]
+        msg = (
+            "⚠️ **CONFIRM SERVICE MARKUP UPDATE FOR LEDGER**\n\n"
+            "• **Parameter:** Service Margin Markup\n"
+            f"• **Current Markup:** {old_pct:g}%\n"
+            f"• **Proposed New Markup:** **{new_pct:g}%**\n\n"
+            "📌 *Notice: Confirming will change the standard profit margin markup applied to customer orders.*\n\n"
+            "Apply this markup change to the active ledger?"
         )
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Invalid percentage. Please enter a valid number, e.g. `/setmarkup 20`", parse_mode="Markdown")
 
 
 @require_bot_channel_and_admin
 async def setlastmile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Update the Yangon local last-mile dispatch buffer in MMK."""
+    """Prompt confirmation to update the Yangon local last-mile dispatch buffer in MMK."""
     args = context.args
     if not args:
         current = get_lastmile_fee()
@@ -1207,15 +1454,21 @@ async def setlastmile_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         old_fee = get_lastmile_fee()
-        set_lastmile_fee(new_fee)
-
-        await update.message.reply_text(
-            f"✅ **Yangon Last-Mile Buffer Updated!**\n\n"
-            f"• **Previous Buffer:** {old_fee:,.0f} MMK\n"
-            f"• **New Buffer:** **{new_fee:,.0f} MMK**\n\n"
-            f"🚚 Local delivery dispatch buffer updated.",
-            parse_mode="Markdown"
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm & Apply", callback_data=f"cfgconfirm_lastmile_{new_fee}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cfgcancel")
+            ]
+        ]
+        msg = (
+            "⚠️ **CONFIRM LAST-MILE BUFFER UPDATE FOR LEDGER**\n\n"
+            "• **Parameter:** Yangon Domestic Delivery Buffer\n"
+            f"• **Current Buffer:** {old_fee:,.0f} MMK\n"
+            f"• **Proposed New Buffer:** **{new_fee:,.0f} MMK**\n\n"
+            "📌 *Notice: Confirming will adjust domestic delivery dispatch buffer calculations.*\n\n"
+            "Apply this delivery fee change to the active ledger?"
         )
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ Invalid number. Please enter a valid amount, e.g. `/setlastmile 6000`", parse_mode="Markdown")
 
@@ -1254,6 +1507,10 @@ async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "new order" in text or "➕" in text:
         return await start_order(update, context)
+    elif "calc" in text or "🧮" in text:
+        return await start_calc(update, context)
+    elif "live pricing" in text or "pricing" in text or "💱" in text:
+        return await fx_command(update, context)
     elif "pending" in text or "active" in text or ("order" in text and "new" not in text):
         return await pending_orders_command(update, context)
     elif "summary" in text or "📊" in text:
@@ -1301,13 +1558,14 @@ async def setup_bot_commands(application):
     """Register native Telegram commands so they appear in UI autocomplete / slash menu."""
     commands = [
         BotCommand("neworder", "Take a customer order (7-step intake)"),
+        BotCommand("calc", "Step-by-step sourcing & profit calculator"),
         BotCommand("pending", "View active orders in pipeline"),
         BotCommand("summary", "View business revenue & metrics"),
         BotCommand("batches", "View air cargo shipments & tracking"),
         BotCommand("newbatch", "Create new air cargo batch"),
         BotCommand("order", "Look up order card by ID"),
         BotCommand("fx", "View & adjust live operational pricing"),
-        BotCommand("setfx", "Set SGD to MMK exchange rate"),
+        BotCommand("setfx", "Set SGD to MMK exchange rate (Ledger)"),
         BotCommand("setcargo", "Set air cargo rate per kg (SGD)"),
         BotCommand("setmarkup", "Set service markup percentage"),
         BotCommand("setlastmile", "Set Yangon last-mile buffer (MMK)"),
@@ -1380,6 +1638,33 @@ def main():
     app.add_handler(order_conv)
     app.add_handler(batch_conv)
 
+    # Sourcing Calculator Wizard Conversation
+    calc_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("calc", start_calc),
+            MessageHandler(filters.Regex(r"(?i)^(🧮\s*Calculator|Calculator|/calc)$"), start_calc),
+        ],
+        states={
+            CALC_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_calc_price)],
+            CALC_WEIGHT: [
+                CallbackQueryHandler(receive_calc_weight_inline, pattern="^cweight_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_calc_weight_text),
+            ],
+            CALC_FX: [
+                CallbackQueryHandler(receive_calc_fx_inline, pattern="^cfx_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_calc_fx_text),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_conv),
+            MessageHandler(filters.Regex(r"(?i)^(❌ Cancel|❌ Cancel Calculation|/cancel)$"), cancel_conv),
+            MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text),
+        ],
+        allow_reentry=True,
+        per_message=False,
+    )
+    app.add_handler(calc_conv)
+
     # Command Handlers with aliases
     app.add_handler(CommandHandler(["start", "menu"], start_menu))
     app.add_handler(CommandHandler("id", get_my_id))
@@ -1401,7 +1686,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text))
 
     # Callback handlers
-    app.add_handler(CallbackQueryHandler(handle_card_callbacks, pattern="^(card_|setstage_|bstatus_|prompt_set)"))
+    app.add_handler(CallbackQueryHandler(handle_card_callbacks, pattern="^(card_|setstage_|bstatus_|prompt_set|cfgconfirm_|cfgcancel|recalc|start_order_from_calc)"))
 
     logger.info("🍸 25 Martini Telegram Bot (@mtniassistantbot) starting polling...")
     app.run_polling()

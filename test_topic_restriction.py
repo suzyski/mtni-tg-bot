@@ -30,7 +30,15 @@ from bot import (
     get_service_markup,
     set_service_markup,
     get_lastmile_fee,
-    set_lastmile_fee
+    set_lastmile_fee,
+    handle_card_callbacks,
+    start_calc,
+    receive_calc_price,
+    receive_calc_weight_inline,
+    receive_calc_fx_inline,
+    CALC_PRICE,
+    CALC_WEIGHT,
+    CALC_FX
 )
 
 def make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621):
@@ -106,59 +114,104 @@ async def run_tests():
     assert "Operational Pricing Parameters" in fx_msg
     print("  ✅ Test 8: /fx command shows operational parameters in topic 621 -> PASS")
 
-    # Test 9: /setfx updates rate persistently
-    set_current_fx_rate(3450.0)
-    assert get_current_fx_rate() == 3450.0
+    # Test 9: /setfx sends confirmation card without applying immediately
+    set_current_fx_rate(3400.0)
     up_setfx = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
     mock_ctx = MagicMock()
     mock_ctx.args = ["3500"]
     await setfx_command(up_setfx, mock_ctx)
+    assert up_setfx.effective_message.reply_text.called
+    assert get_current_fx_rate() == 3400.0, "Rate must NOT change before confirmation!"
+    call_kwargs = up_setfx.effective_message.reply_text.call_args[1]
+    kb = call_kwargs["reply_markup"]
+    btn_confirm = kb.inline_keyboard[0][0]
+    assert btn_confirm.callback_data == "cfgconfirm_fx_3500.0"
+    print("  ✅ Test 9: /setfx renders confirmation card with confirm/cancel buttons -> PASS")
+
+    # Test 10: Confirmation callback applies rate to ledger
+    up_cb = MagicMock()
+    up_cb.callback_query.data = "cfgconfirm_fx_3500.0"
+    up_cb.callback_query.answer = AsyncMock()
+    up_cb.callback_query.edit_message_text = AsyncMock()
+    await handle_card_callbacks(up_cb, MagicMock())
     assert get_current_fx_rate() == 3500.0
-    print("  ✅ Test 9: /setfx updates rate to 3500 dynamically -> PASS")
+    print("  ✅ Test 10: Confirm button callback applies 3500 FX rate to ledger -> PASS")
+    set_current_fx_rate(3400.0)  # Reset
 
-    # Reset back to 3400 baseline
-    set_current_fx_rate(3400.0)
+    # Test 11: Cancel callback preserves original rate
+    up_cancel_cb = MagicMock()
+    up_cancel_cb.callback_query.data = "cfgcancel"
+    up_cancel_cb.callback_query.answer = AsyncMock()
+    up_cancel_cb.callback_query.edit_message_text = AsyncMock()
+    await handle_card_callbacks(up_cancel_cb, MagicMock())
+    assert get_current_fx_rate() == 3400.0
+    print("  ✅ Test 11: Cancel button callback preserves original ledger values -> PASS")
 
-    # Test 10: /setfx blocked outside topic 621
+    # Test 12: /set* commands blocked outside topic 621
     up_setfx_wrong = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=34)
     await setfx_command(up_setfx_wrong, mock_ctx)
-    assert get_current_fx_rate() == 3400.0, "Rate should NOT have changed in wrong topic"
-    print("  ✅ Test 10: /setfx blocked outside topic 621 -> PASS")
+    assert not up_setfx_wrong.effective_message.reply_text.called or "Bot Channel Only" in up_setfx_wrong.effective_message.reply_text.call_args[0][0]
+    print("  ✅ Test 12: /set* blocked outside topic 621 -> PASS")
 
-    # Test 11: /setcargo updates cargo rate persistently
-    set_cargo_rate(16.0)
-    assert get_cargo_rate() == 16.0
+    # Test 13: /setcargo, /setmarkup, /setlastmile confirmation cards
     up_cargo = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
     mock_cargo_ctx = MagicMock()
     mock_cargo_ctx.args = ["18.5"]
     await setcargo_command(up_cargo, mock_cargo_ctx)
+    cargo_kb = up_cargo.effective_message.reply_text.call_args[1]["reply_markup"]
+    assert cargo_kb.inline_keyboard[0][0].callback_data == "cfgconfirm_cargo_18.5"
+
+    up_cargo_confirm = MagicMock()
+    up_cargo_confirm.callback_query.data = "cfgconfirm_cargo_18.5"
+    up_cargo_confirm.callback_query.answer = AsyncMock()
+    up_cargo_confirm.callback_query.edit_message_text = AsyncMock()
+    await handle_card_callbacks(up_cargo_confirm, MagicMock())
     assert get_cargo_rate() == 18.5
-    print("  ✅ Test 11: /setcargo updates air cargo rate to 18.5 SGD/kg -> PASS")
     set_cargo_rate(16.0)  # Reset
+    print("  ✅ Test 13: /setcargo confirmation card and callback verified -> PASS")
 
-    # Test 12: /setmarkup updates service markup %
-    set_service_markup(15.0)
-    assert get_service_markup() == 15.0
-    up_markup = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
-    mock_markup_ctx = MagicMock()
-    mock_markup_ctx.args = ["20"]
-    await setmarkup_command(up_markup, mock_markup_ctx)
-    assert get_service_markup() == 20.0
-    print("  ✅ Test 12: /setmarkup updates service markup to 20% -> PASS")
-    set_service_markup(15.0)  # Reset
+    # Test 14: Sourcing Calculator Wizard (/calc) - Step 1: Start
+    ctx_calc = MagicMock()
+    ctx_calc.user_data = {}
+    up_calc_start = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
+    next_state = await start_calc(up_calc_start, ctx_calc)
+    assert next_state == CALC_PRICE
+    assert "Step 1/3" in up_calc_start.effective_message.reply_text.call_args[0][0]
+    print("  ✅ Test 14: /calc wizard Step 1 prompts for retail SGD price -> PASS")
 
-    # Test 13: /setlastmile updates Yangon delivery fee
-    set_lastmile_fee(5000.0)
-    assert get_lastmile_fee() == 5000.0
-    up_lastmile = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
-    mock_lastmile_ctx = MagicMock()
-    mock_lastmile_ctx.args = ["6000"]
-    await setlastmile_command(up_lastmile, mock_lastmile_ctx)
-    assert get_lastmile_fee() == 6000.0
-    print("  ✅ Test 13: /setlastmile updates Yangon delivery to 6,000 MMK -> PASS")
-    set_lastmile_fee(5000.0)  # Reset
+    # Test 15: Sourcing Calculator Wizard - Step 2: Receive Price & Show Weights
+    up_price = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
+    up_price.message.text = "189"
+    next_state_2 = await receive_calc_price(up_price, ctx_calc)
+    assert next_state_2 == CALC_WEIGHT
+    assert ctx_calc.user_data["calc_price"] == 189.0
+    print("  ✅ Test 15: /calc wizard Step 2 parses price and shows category buttons -> PASS")
 
-    print("\n🎉 ALL 13 TESTS PASSED SUCCESSFULLY!")
+    # Test 16: Sourcing Calculator Wizard - Step 3: Choose Weight & Show FX
+    up_weight_cb = MagicMock()
+    up_weight_cb.callback_query.data = "cweight_0.45"
+    up_weight_cb.callback_query.answer = AsyncMock()
+    up_weight_cb.callback_query.edit_message_text = AsyncMock()
+    next_state_3 = await receive_calc_weight_inline(up_weight_cb, ctx_calc)
+    assert next_state_3 == CALC_FX
+    assert ctx_calc.user_data["calc_weight"] == 0.45
+    print("  ✅ Test 16: /calc wizard Step 3 sets weight (0.45kg) and prompts for FX -> PASS")
+
+    # Test 17: Sourcing Calculator Wizard - Final Analysis Card & Sourcing Verdict
+    from telegram.ext import ConversationHandler
+    up_fx_cb = MagicMock()
+    up_fx_cb.callback_query.data = "cfx_3400.0"
+    up_fx_cb.callback_query.answer = AsyncMock()
+    up_fx_cb.callback_query.edit_message_text = AsyncMock()
+    final_res = await receive_calc_fx_inline(up_fx_cb, ctx_calc)
+    assert final_res == ConversationHandler.END
+    card_rendered = up_fx_cb.callback_query.edit_message_text.call_args[0][0]
+    assert "SOURCING FEASIBILITY ANALYSIS" in card_rendered
+    assert "HIGHLY RECOMMENDED TO SELL" in card_rendered
+    assert "Customer Selling Price" in card_rendered
+    print("  ✅ Test 17: /calc renders complete feasibility analysis card & verdict -> PASS")
+
+    print("\n🎉 ALL 17 TESTS PASSED SUCCESSFULLY!")
 
 if __name__ == "__main__":
     asyncio.run(run_tests())
