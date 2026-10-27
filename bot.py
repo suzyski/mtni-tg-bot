@@ -8,6 +8,7 @@ Includes background HTTP health server on port 7860 for Hugging Face Spaces.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
 )
 from telegram.ext import (
@@ -60,6 +62,8 @@ if env_admin_ids:
 else:
     ADMIN_IDS = DEFAULT_ADMIN_IDS
 
+BOT_CHANNEL_ID = os.getenv("BOT_CHANNEL_ID", "-1004342732438")
+BOT_CHANNEL_TOPIC_ID = int(os.getenv("BOT_CHANNEL_TOPIC_ID", "621"))
 ORDER_TRACK_CHANNEL_ID = os.getenv("ORDER_TRACK_CHANNEL_ID", "-1004342732438")
 ORDER_TRACK_TOPIC_ID = os.getenv("ORDER_TRACK_TOPIC_ID", "34")
 BATCH_CHANNEL_ID = os.getenv("BATCH_CHANNEL_ID", "-1004342732438")
@@ -101,6 +105,55 @@ def is_admin(update: Update) -> bool:
     if not update or not update.effective_user:
         return False
     return update.effective_user.id in ADMIN_IDS
+
+
+def is_allowed_topic(update: Update) -> bool:
+    """Check if the update originates from the allowed Bot Channel topic or an authorized private DM."""
+    if not update or not update.effective_chat:
+        return False
+
+    # Allow 1-on-1 private chat with an admin
+    if update.effective_chat.type == "private":
+        return True
+
+    chat_id = str(update.effective_chat.id)
+    target_chat = str(BOT_CHANNEL_ID)
+
+    msg = update.effective_message
+    thread_id = getattr(msg, "message_thread_id", None) if msg else None
+
+    if chat_id == target_chat and thread_id == BOT_CHANNEL_TOPIC_ID:
+        return True
+
+    return False
+
+
+def require_bot_channel_and_admin(func):
+    """Decorator ensuring handler only runs for admins inside the designated Bot Channel topic or private DM."""
+    @functools.wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not is_admin(update):
+            user_id = update.effective_user.id if update.effective_user else "Unknown"
+            if update.effective_message:
+                await update.effective_message.reply_text(
+                    f"⛔ **Access Denied**\n\nYour Telegram User ID is `{user_id}`.\nPlease ask Wynn to add your ID to `ADMIN_IDS`.",
+                    parse_mode="Markdown"
+                )
+            return
+
+        if not is_allowed_topic(update):
+            if update.effective_message:
+                await update.effective_message.reply_text(
+                    "⚠️ **Bot Channel Only**\n\n"
+                    "To keep typing boxes and keyboards clean across other discussion channels, bot commands and menus are restricted to the **Bot Channel** topic.\n\n"
+                    "👉 Please run this command inside the **Bot Channel** topic.",
+                    reply_markup=ReplyKeyboardRemove(),
+                    parse_mode="Markdown"
+                )
+            return
+
+        return await func(update, context, *args, **kwargs)
+    return wrapper
 
 
 def clean_order_id(val: Any) -> str:
@@ -196,6 +249,15 @@ async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point for /neworder conversation."""
     if not is_admin(update):
         await update.message.reply_text("⛔ Access Denied. You are not authorized to use this bot.")
+        return ConversationHandler.END
+
+    if not is_allowed_topic(update):
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ /neworder can only be started inside the designated **Bot Channel** topic.",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode="Markdown"
+            )
         return ConversationHandler.END
 
     context.user_data.clear()
@@ -405,13 +467,17 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     msg = update.effective_message
     if msg:
-        await msg.reply_text("❌ Action cancelled. Returning to main menu.", reply_markup=get_main_menu_keyboard())
+        if is_allowed_topic(update):
+            await msg.reply_text("❌ Action cancelled. Returning to main menu.", reply_markup=get_main_menu_keyboard())
+        else:
+            await msg.reply_text("❌ Action cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 
 # ---------------------------------------------------------------------------
 # Order Lookup & Admin Commands
 # ---------------------------------------------------------------------------
+@require_bot_channel_and_admin
 async def get_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lookup order details with action buttons."""
     if not is_admin(update):
@@ -459,6 +525,7 @@ async def get_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@require_bot_channel_and_admin
 async def pending_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all active orders from Notion."""
     if not is_admin(update):
@@ -481,6 +548,7 @@ async def pending_orders_command(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+@require_bot_channel_and_admin
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Aggregate business metrics from Notion."""
     if not is_admin(update):
@@ -512,6 +580,7 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
 
 
+@require_bot_channel_and_admin
 async def update_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Advance order stage: /updatestatus [id] [stage]."""
     if not is_admin(update):
@@ -542,6 +611,7 @@ async def update_status_command(update: Update, context: ContextTypes.DEFAULT_TY
     await broadcast_to_channel(context, ORDER_TRACK_CHANNEL_ID, broadcast_text, ORDER_TRACK_TOPIC_ID)
 
 
+@require_bot_channel_and_admin
 async def cancel_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel order: /cancelorder [id] [reason]."""
     if not is_admin(update):
@@ -566,6 +636,7 @@ async def cancel_order_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await broadcast_to_channel(context, ORDER_TRACK_CHANNEL_ID, broadcast_text, ORDER_TRACK_TOPIC_ID)
 
 
+@require_bot_channel_and_admin
 async def editdeposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle deposit: /editdeposit [id] [yes/no]."""
     if not is_admin(update):
@@ -595,6 +666,7 @@ async def editdeposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ---------------------------------------------------------------------------
 # Cargo Batches Commands (/batches, /newbatch, /batchstatus)
 # ---------------------------------------------------------------------------
+@require_bot_channel_and_admin
 async def batches_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all cargo batches from Notion."""
     if not is_admin(update):
@@ -621,6 +693,15 @@ async def start_newbatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start batch intake."""
     if not is_admin(update):
         await update.message.reply_text("⛔ Access Denied.")
+        return ConversationHandler.END
+
+    if not is_allowed_topic(update):
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ /newbatch can only be started inside the designated **Bot Channel** topic.",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode="Markdown"
+            )
         return ConversationHandler.END
 
     context.user_data.clear()
@@ -847,16 +928,9 @@ async def handle_card_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
 # ---------------------------------------------------------------------------
 # Menu & Identity Commands
 # ---------------------------------------------------------------------------
+@require_bot_channel_and_admin
 async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show main keyboard and welcome message."""
-    if not is_admin(update):
-        user_id = update.effective_user.id if update.effective_user else "Unknown"
-        await update.message.reply_text(
-            f"⛔ **Access Denied**\n\nYour Telegram User ID is `{user_id}`.\nPlease ask Wynn to add your ID to `ADMIN_IDS`.",
-            parse_mode="Markdown"
-        )
-        return
-
     keyboard = [
         ["📋 Pending Orders", "📊 Summary"],
         ["➕ New Order", "📦 Batch Status"],
@@ -870,10 +944,21 @@ async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/order [id]` — Look up an order card with action buttons\n"
         "• `/summary` — View business revenue & pipeline metrics\n"
         "• `/batches` — View air cargo shipments & tracking\n"
-        "• `/newbatch` — Create new cargo batch\n\n"
+        "• `/newbatch` — Create new cargo batch\n"
+        "• `/clean` — Remove keyboard buttons from this chat\n\n"
         "🔗 [Open 25 Martini Notion Hub](https://app.notion.com/p/25-Martini-Sales-Hunt-3dbf3e9bb31c81bfb958e8bc4728af09)"
     )
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def clean_keyboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Purge stuck custom keyboards from any chat or topic."""
+    if not is_admin(update):
+        return
+    await update.effective_message.reply_text(
+        "🧹 Custom keyboard removed from this chat/topic. Your typing box is clear.",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 
 async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -882,6 +967,18 @@ async def get_my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+
+    if not is_allowed_topic(update):
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                "🧹 Custom keyboard removed. Please use the designated **Bot Channel** topic for bot operations.",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode="Markdown"
+            )
+        return
+
     raw_text = update.message.text.strip() if update.message and update.message.text else ""
     text = raw_text.lower()
     context.user_data.clear()
@@ -1001,6 +1098,7 @@ def main():
     app.add_handler(CommandHandler("updatestatus", update_status_command))
     app.add_handler(CommandHandler("cancelorder", cancel_order_command))
     app.add_handler(CommandHandler("editdeposit", editdeposit_command))
+    app.add_handler(CommandHandler(["clean", "cleankeyboard", "clear"], clean_keyboard_command))
 
     # Menu text buttons matching MENU_REGEX
     app.add_handler(MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text))
