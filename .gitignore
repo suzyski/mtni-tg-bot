@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 bot.py.bak*
 fx_config.json
+pricing_config.json
 mtni-bot.zip
 deploy-justrunmy/

@@ -32,6 +32,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -71,29 +72,76 @@ BATCH_CHANNEL_ID = os.getenv("BATCH_CHANNEL_ID", "-1004342732438")
 BATCH_TOPIC_ID = os.getenv("BATCH_TOPIC_ID", "36")
 PORT = int(os.getenv("PORT", "7860"))
 
-# Dynamic FX Configuration
-FX_CONFIG_FILE = Path(__file__).resolve().parent / "fx_config.json"
+# Dynamic Operational Pricing Configuration
+PRICING_CONFIG_FILE = Path(__file__).resolve().parent / "pricing_config.json"
+DEFAULT_PRICING_CONFIG = {
+    "sgd_to_mmk_rate": 3400.0,
+    "cargo_rate_per_kg": 16.0,
+    "service_markup_pct": 15.0,
+    "yangon_lastmile_mmk": 5000.0
+}
 
-def get_current_fx_rate() -> float:
-    """Get active operational SGD to MMK exchange rate."""
-    if FX_CONFIG_FILE.exists():
+def load_pricing_config() -> dict:
+    """Load operational pricing configuration from JSON file or fallbacks."""
+    config = dict(DEFAULT_PRICING_CONFIG)
+    legacy_fx = Path(__file__).resolve().parent / "fx_config.json"
+    if legacy_fx.exists():
         try:
-            with open(FX_CONFIG_FILE, "r") as f:
+            with open(legacy_fx, "r") as f:
                 data = json.load(f)
-                return float(data.get("sgd_to_mmk_rate", 3400.0))
+                if "sgd_to_mmk_rate" in data:
+                    config["sgd_to_mmk_rate"] = float(data["sgd_to_mmk_rate"])
         except Exception:
             pass
-    return float(os.getenv("SGD_TO_MMK_RATE", "3400.0"))
+
+    if PRICING_CONFIG_FILE.exists():
+        try:
+            with open(PRICING_CONFIG_FILE, "r") as f:
+                data = json.load(f)
+                config.update(data)
+        except Exception:
+            pass
+    return config
+
+def save_pricing_config_key(key: str, value: float) -> dict:
+    """Save an operational pricing parameter persistently."""
+    config = load_pricing_config()
+    config[key] = value
+    config["updated_at"] = str(datetime.now())
+    try:
+        with open(PRICING_CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save pricing config: {e}")
+    return config
+
+def get_current_fx_rate() -> float:
+    return float(load_pricing_config().get("sgd_to_mmk_rate", 3400.0))
 
 def set_current_fx_rate(rate: float) -> bool:
-    """Save active operational SGD to MMK exchange rate."""
-    try:
-        with open(FX_CONFIG_FILE, "w") as f:
-            json.dump({"sgd_to_mmk_rate": rate, "updated_at": str(datetime.now())}, f, indent=2)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save FX rate: {e}")
-        return False
+    save_pricing_config_key("sgd_to_mmk_rate", rate)
+    return True
+
+def get_cargo_rate() -> float:
+    return float(load_pricing_config().get("cargo_rate_per_kg", 16.0))
+
+def set_cargo_rate(rate: float) -> bool:
+    save_pricing_config_key("cargo_rate_per_kg", rate)
+    return True
+
+def get_service_markup() -> float:
+    return float(load_pricing_config().get("service_markup_pct", 15.0))
+
+def set_service_markup(pct: float) -> bool:
+    save_pricing_config_key("service_markup_pct", pct)
+    return True
+
+def get_lastmile_fee() -> float:
+    return float(load_pricing_config().get("yangon_lastmile_mmk", 5000.0))
+
+def set_lastmile_fee(fee: float) -> bool:
+    save_pricing_config_key("yangon_lastmile_mmk", fee)
+    return True
 
 # ---------------------------------------------------------------------------
 # Conversation State Constants
@@ -950,6 +998,21 @@ async def handle_card_callbacks(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(f"❌ Batch #{batch_id} not found.")
         return
 
+    if data.startswith("prompt_set"):
+        param = data.replace("prompt_set", "")
+        examples = {
+            "fx": "`/setfx 3450` (MMK per SGD)",
+            "cargo": "`/setcargo 18` (S$ per kg)",
+            "markup": "`/setmarkup 20` (percentage %)",
+            "lastmile": "`/setlastmile 6000` (MMK dispatch buffer)"
+        }
+        ex = examples.get(param, "")
+        await query.message.reply_text(
+            f"👉 **To update this parameter, send the command:**\n\n{ex}",
+            parse_mode="Markdown"
+        )
+        return
+
 
 # ---------------------------------------------------------------------------
 # Menu & Identity Commands
@@ -971,29 +1034,54 @@ async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/summary` — View business revenue & pipeline metrics\n"
         "• `/batches` — View air cargo shipments & tracking\n"
         "• `/newbatch` — Create new cargo batch\n"
-        "• `/fx` — View active operational exchange rate\n"
+        "• `/fx` — View and adjust live operational pricing\n"
         "• `/setfx [rate]` — Update live SGD/MMK exchange rate\n"
+        "• `/setcargo [sgd]` — Update air cargo rate per kg (SGD)\n"
+        "• `/setmarkup [pct]` — Update service markup %\n"
+        "• `/setlastmile [mmk]` — Update Yangon last-mile buffer (MMK)\n"
         "• `/clean` — Remove keyboard buttons from this chat\n\n"
         "🔗 [Open 25 Martini Notion Hub](https://app.notion.com/p/25-Martini-Sales-Hunt-3dbf3e9bb31c81bfb958e8bc4728af09)"
     )
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown", disable_web_page_preview=True)
 
 
+def get_pricing_keyboard():
+    """Inline keyboard for one-tap guidance on updating operational parameters."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ Set FX Rate", callback_data="prompt_setfx"),
+            InlineKeyboardButton("✈️ Set Cargo Rate", callback_data="prompt_setcargo"),
+        ],
+        [
+            InlineKeyboardButton("🏷️ Set Markup %", callback_data="prompt_setmarkup"),
+            InlineKeyboardButton("🚚 Set Last-Mile", callback_data="prompt_setlastmile"),
+        ]
+    ])
+
+
 @require_bot_channel_and_admin
 async def fx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current operational exchange rate and logistics parameters."""
-    rate = get_current_fx_rate()
+    cfg = load_pricing_config()
+    fx = cfg.get("sgd_to_mmk_rate", 3400.0)
+    cargo = cfg.get("cargo_rate_per_kg", 16.0)
+    markup = cfg.get("service_markup_pct", 15.0)
+    lastmile = cfg.get("yangon_lastmile_mmk", 5000.0)
+
     msg = (
-        "💱 **25 Martini — Operational Exchange Rate**\n\n"
-        f"• **Active Rate:** 1 SGD = **{rate:,.0f} MMK**\n"
-        f"• **Air Cargo Rate:** ~S$16.00 / kg\n"
-        f"• **Service Fee:** 15% Landed Markup\n"
-        f"• **Yangon Last-Mile:** ~5,000 MMK\n\n"
-        "💡 *To update the operational exchange rate:*\n"
-        "`/setfx <rate>` (e.g. `/setfx 3450`)\n\n"
-        "All new order calculations in the bot will immediately use the updated rate."
+        "💱 **25 Martini — Operational Pricing Parameters**\n\n"
+        f"• **Active FX Rate:** 1 SGD = **{fx:,.0f} MMK**\n"
+        f"• **Air Cargo Rate:** **S${cargo:,.2f} / kg**\n"
+        f"• **Service Fee:** **{markup:g}%** Landed Markup\n"
+        f"• **Yangon Last-Mile:** **{lastmile:,.0f} MMK**\n\n"
+        "💡 *Tap a button below or use direct commands:*\n"
+        "• `/setfx <rate>` (e.g. `/setfx 3450`)\n"
+        "• `/setcargo <sgd>` (e.g. `/setcargo 18`)\n"
+        "• `/setmarkup <pct>` (e.g. `/setmarkup 20`)\n"
+        "• `/setlastmile <mmk>` (e.g. `/setlastmile 6000`)\n\n"
+        "All new order calculations in the bot will immediately use these values."
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, reply_markup=get_pricing_keyboard(), parse_mode="Markdown")
 
 
 @require_bot_channel_and_admin
@@ -1003,7 +1091,7 @@ async def setfx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         current = get_current_fx_rate()
         await update.message.reply_text(
-            f"ℹ️ **Current Operational Rate:** 1 SGD = **{current:,.0f} MMK**\n\n"
+            f"ℹ️ **Current Active FX Rate:** 1 SGD = **{current:,.0f} MMK**\n\n"
             "To set a new rate, provide the MMK amount:\n"
             "👉 `/setfx 3450`",
             parse_mode="Markdown"
@@ -1013,7 +1101,7 @@ async def setfx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         new_rate = float(args[0].replace(",", "").strip())
         if new_rate < 1000 or new_rate > 10000:
-            await update.message.reply_text("⚠️ Rate must be between 1,000 and 10,000 MMK per SGD.", parse_mode="Markdown")
+            await update.message.reply_text("⚠️ FX rate must be between 1,000 and 10,000 MMK per SGD.", parse_mode="Markdown")
             return
 
         old_rate = get_current_fx_rate()
@@ -1028,6 +1116,108 @@ async def setfx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except ValueError:
         await update.message.reply_text("❌ Invalid number. Please enter a valid rate, e.g. `/setfx 3450`", parse_mode="Markdown")
+
+
+@require_bot_channel_and_admin
+async def setcargo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update the operational air cargo rate per kg (in SGD)."""
+    args = context.args
+    if not args:
+        current = get_cargo_rate()
+        await update.message.reply_text(
+            f"ℹ️ **Current Air Cargo Rate:** **S${current:,.2f} / kg**\n\n"
+            "To set a new cargo rate (in SGD), send:\n"
+            "👉 `/setcargo 18` (or `/setcargo 16.50`)",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        new_rate = float(args[0].replace("$", "").replace(",", "").strip())
+        if new_rate < 1 or new_rate > 100:
+            await update.message.reply_text("⚠️ Cargo rate must be between S$1.00 and S$100.00 per kg.", parse_mode="Markdown")
+            return
+
+        old_rate = get_cargo_rate()
+        set_cargo_rate(new_rate)
+
+        await update.message.reply_text(
+            f"✅ **Air Cargo Rate Updated!**\n\n"
+            f"• **Previous Rate:** S${old_rate:,.2f} / kg\n"
+            f"• **New Rate:** **S${new_rate:,.2f} / kg**\n\n"
+            f"✈️ Air freight calculations for batch orders will use this rate.",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number. Please enter a valid rate, e.g. `/setcargo 18`", parse_mode="Markdown")
+
+
+@require_bot_channel_and_admin
+async def setmarkup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update the service markup percentage."""
+    args = context.args
+    if not args:
+        current = get_service_markup()
+        await update.message.reply_text(
+            f"ℹ️ **Current Service Markup:** **{current:g}%**\n\n"
+            "To set a new markup percentage, send:\n"
+            "👉 `/setmarkup 20` (or `/setmarkup 12.5`)",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        new_pct = float(args[0].replace("%", "").strip())
+        if new_pct < 0 or new_pct > 100:
+            await update.message.reply_text("⚠️ Markup must be between 0% and 100%.", parse_mode="Markdown")
+            return
+
+        old_pct = get_service_markup()
+        set_service_markup(new_pct)
+
+        await update.message.reply_text(
+            f"✅ **Service Markup Updated!**\n\n"
+            f"• **Previous Markup:** {old_pct:g}%\n"
+            f"• **New Markup:** **{new_pct:g}%**\n\n"
+            f"🏷️ Profit margin multiplier updated across pricing calculations.",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid percentage. Please enter a valid number, e.g. `/setmarkup 20`", parse_mode="Markdown")
+
+
+@require_bot_channel_and_admin
+async def setlastmile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update the Yangon local last-mile dispatch buffer in MMK."""
+    args = context.args
+    if not args:
+        current = get_lastmile_fee()
+        await update.message.reply_text(
+            f"ℹ️ **Current Yangon Last-Mile Buffer:** **{current:,.0f} MMK**\n\n"
+            "To set a new last-mile buffer, send:\n"
+            "👉 `/setlastmile 6000`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        new_fee = float(args[0].replace(",", "").strip())
+        if new_fee < 0 or new_fee > 50000:
+            await update.message.reply_text("⚠️ Last-mile fee must be between 0 and 50,000 MMK.", parse_mode="Markdown")
+            return
+
+        old_fee = get_lastmile_fee()
+        set_lastmile_fee(new_fee)
+
+        await update.message.reply_text(
+            f"✅ **Yangon Last-Mile Buffer Updated!**\n\n"
+            f"• **Previous Buffer:** {old_fee:,.0f} MMK\n"
+            f"• **New Buffer:** **{new_fee:,.0f} MMK**\n\n"
+            f"🚚 Local delivery dispatch buffer updated.",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number. Please enter a valid amount, e.g. `/setlastmile 6000`", parse_mode="Markdown")
 
 
 async def clean_keyboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1107,6 +1297,29 @@ def run_health_server(port: int = 7860):
 # ---------------------------------------------------------------------------
 # Main Runner
 # ---------------------------------------------------------------------------
+async def setup_bot_commands(application):
+    """Register native Telegram commands so they appear in UI autocomplete / slash menu."""
+    commands = [
+        BotCommand("neworder", "Take a customer order (7-step intake)"),
+        BotCommand("pending", "View active orders in pipeline"),
+        BotCommand("summary", "View business revenue & metrics"),
+        BotCommand("batches", "View air cargo shipments & tracking"),
+        BotCommand("newbatch", "Create new air cargo batch"),
+        BotCommand("order", "Look up order card by ID"),
+        BotCommand("fx", "View & adjust live operational pricing"),
+        BotCommand("setfx", "Set SGD to MMK exchange rate"),
+        BotCommand("setcargo", "Set air cargo rate per kg (SGD)"),
+        BotCommand("setmarkup", "Set service markup percentage"),
+        BotCommand("setlastmile", "Set Yangon last-mile buffer (MMK)"),
+        BotCommand("clean", "Remove stuck custom keyboard"),
+    ]
+    try:
+        await application.bot.set_my_commands(commands)
+        logger.info("✅ Native bot commands registered successfully with Telegram")
+    except Exception as e:
+        logger.error(f"Failed to set bot commands: {e}")
+
+
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token or "PLACEHOLDER" in token:
@@ -1116,7 +1329,7 @@ def main():
     health_thread = threading.Thread(target=run_health_server, args=(PORT,), daemon=True)
     health_thread.start()
 
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(token).post_init(setup_bot_commands).build()
 
     # Order Creation Conversation
     order_conv = ConversationHandler(
@@ -1177,15 +1390,18 @@ def main():
     app.add_handler(CommandHandler("updatestatus", update_status_command))
     app.add_handler(CommandHandler("cancelorder", cancel_order_command))
     app.add_handler(CommandHandler("editdeposit", editdeposit_command))
-    app.add_handler(CommandHandler(["fx", "rate", "rates"], fx_command))
+    app.add_handler(CommandHandler(["fx", "pricing", "rate", "rates"], fx_command))
     app.add_handler(CommandHandler("setfx", setfx_command))
+    app.add_handler(CommandHandler(["setcargo", "cargo"], setcargo_command))
+    app.add_handler(CommandHandler(["setmarkup", "markup", "margin"], setmarkup_command))
+    app.add_handler(CommandHandler(["setlastmile", "lastmile"], setlastmile_command))
     app.add_handler(CommandHandler(["clean", "cleankeyboard", "clear"], clean_keyboard_command))
 
     # Menu text buttons matching MENU_REGEX
     app.add_handler(MessageHandler(filters.Regex(MENU_REGEX), handle_menu_text))
 
     # Callback handlers
-    app.add_handler(CallbackQueryHandler(handle_card_callbacks, pattern="^(card_|setstage_|bstatus_)"))
+    app.add_handler(CallbackQueryHandler(handle_card_callbacks, pattern="^(card_|setstage_|bstatus_|prompt_set)"))
 
     logger.info("🍸 25 Martini Telegram Bot (@mtniassistantbot) starting polling...")
     app.run_polling()

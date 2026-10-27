@@ -20,8 +20,17 @@ from bot import (
     clean_keyboard_command,
     fx_command,
     setfx_command,
+    setcargo_command,
+    setmarkup_command,
+    setlastmile_command,
     get_current_fx_rate,
-    set_current_fx_rate
+    set_current_fx_rate,
+    get_cargo_rate,
+    set_cargo_rate,
+    get_service_markup,
+    set_service_markup,
+    get_lastmile_fee,
+    set_lastmile_fee
 )
 
 def make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621):
@@ -94,8 +103,8 @@ async def run_tests():
     await fx_command(up_fx, MagicMock())
     assert up_fx.effective_message.reply_text.called
     fx_msg = up_fx.effective_message.reply_text.call_args[0][0]
-    assert "Operational Exchange Rate" in fx_msg
-    print("  ✅ Test 8: /fx command shows operational rate in topic 621 -> PASS")
+    assert "Operational Pricing Parameters" in fx_msg
+    print("  ✅ Test 8: /fx command shows operational parameters in topic 621 -> PASS")
 
     # Test 9: /setfx updates rate persistently
     set_current_fx_rate(3450.0)
@@ -116,7 +125,40 @@ async def run_tests():
     assert get_current_fx_rate() == 3400.0, "Rate should NOT have changed in wrong topic"
     print("  ✅ Test 10: /setfx blocked outside topic 621 -> PASS")
 
-    print("\n🎉 ALL 10 TESTS PASSED SUCCESSFULLY!")
+    # Test 11: /setcargo updates cargo rate persistently
+    set_cargo_rate(16.0)
+    assert get_cargo_rate() == 16.0
+    up_cargo = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
+    mock_cargo_ctx = MagicMock()
+    mock_cargo_ctx.args = ["18.5"]
+    await setcargo_command(up_cargo, mock_cargo_ctx)
+    assert get_cargo_rate() == 18.5
+    print("  ✅ Test 11: /setcargo updates air cargo rate to 18.5 SGD/kg -> PASS")
+    set_cargo_rate(16.0)  # Reset
+
+    # Test 12: /setmarkup updates service markup %
+    set_service_markup(15.0)
+    assert get_service_markup() == 15.0
+    up_markup = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
+    mock_markup_ctx = MagicMock()
+    mock_markup_ctx.args = ["20"]
+    await setmarkup_command(up_markup, mock_markup_ctx)
+    assert get_service_markup() == 20.0
+    print("  ✅ Test 12: /setmarkup updates service markup to 20% -> PASS")
+    set_service_markup(15.0)  # Reset
+
+    # Test 13: /setlastmile updates Yangon delivery fee
+    set_lastmile_fee(5000.0)
+    assert get_lastmile_fee() == 5000.0
+    up_lastmile = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
+    mock_lastmile_ctx = MagicMock()
+    mock_lastmile_ctx.args = ["6000"]
+    await setlastmile_command(up_lastmile, mock_lastmile_ctx)
+    assert get_lastmile_fee() == 6000.0
+    print("  ✅ Test 13: /setlastmile updates Yangon delivery to 6,000 MMK -> PASS")
+    set_lastmile_fee(5000.0)  # Reset
+
+    print("\n🎉 ALL 13 TESTS PASSED SUCCESSFULLY!")
 
 if __name__ == "__main__":
     asyncio.run(run_tests())
