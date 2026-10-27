@@ -15,6 +15,7 @@ import os
 import re
 import threading
 from datetime import datetime
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Tuple, List, Dict, Any
 
@@ -69,6 +70,30 @@ ORDER_TRACK_TOPIC_ID = os.getenv("ORDER_TRACK_TOPIC_ID", "34")
 BATCH_CHANNEL_ID = os.getenv("BATCH_CHANNEL_ID", "-1004342732438")
 BATCH_TOPIC_ID = os.getenv("BATCH_TOPIC_ID", "36")
 PORT = int(os.getenv("PORT", "7860"))
+
+# Dynamic FX Configuration
+FX_CONFIG_FILE = Path(__file__).resolve().parent / "fx_config.json"
+
+def get_current_fx_rate() -> float:
+    """Get active operational SGD to MMK exchange rate."""
+    if FX_CONFIG_FILE.exists():
+        try:
+            with open(FX_CONFIG_FILE, "r") as f:
+                data = json.load(f)
+                return float(data.get("sgd_to_mmk_rate", 3400.0))
+        except Exception:
+            pass
+    return float(os.getenv("SGD_TO_MMK_RATE", "3400.0"))
+
+def set_current_fx_rate(rate: float) -> bool:
+    """Save active operational SGD to MMK exchange rate."""
+    try:
+        with open(FX_CONFIG_FILE, "w") as f:
+            json.dump({"sgd_to_mmk_rate": rate, "updated_at": str(datetime.now())}, f, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save FX rate: {e}")
+        return False
 
 # ---------------------------------------------------------------------------
 # Conversation State Constants
@@ -307,9 +332,10 @@ async def receive_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return PRICE
 
     # Convert SGD to MMK if small number entered
+    current_fx = get_current_fx_rate()
     if raw_val < 2000:
-        price_mmk = raw_val * 3400
-        sgd_note = f" ({raw_val:g} SGD @ 3,400 FX)"
+        price_mmk = raw_val * current_fx
+        sgd_note = f" ({raw_val:g} SGD @ {current_fx:,.0f} FX)"
     else:
         price_mmk = raw_val
         sgd_note = ""
@@ -945,10 +971,63 @@ async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/summary` — View business revenue & pipeline metrics\n"
         "• `/batches` — View air cargo shipments & tracking\n"
         "• `/newbatch` — Create new cargo batch\n"
+        "• `/fx` — View active operational exchange rate\n"
+        "• `/setfx [rate]` — Update live SGD/MMK exchange rate\n"
         "• `/clean` — Remove keyboard buttons from this chat\n\n"
         "🔗 [Open 25 Martini Notion Hub](https://app.notion.com/p/25-Martini-Sales-Hunt-3dbf3e9bb31c81bfb958e8bc4728af09)"
     )
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+@require_bot_channel_and_admin
+async def fx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current operational exchange rate and logistics parameters."""
+    rate = get_current_fx_rate()
+    msg = (
+        "💱 **25 Martini — Operational Exchange Rate**\n\n"
+        f"• **Active Rate:** 1 SGD = **{rate:,.0f} MMK**\n"
+        f"• **Air Cargo Rate:** ~S$16.00 / kg\n"
+        f"• **Service Fee:** 15% Landed Markup\n"
+        f"• **Yangon Last-Mile:** ~5,000 MMK\n\n"
+        "💡 *To update the operational exchange rate:*\n"
+        "`/setfx <rate>` (e.g. `/setfx 3450`)\n\n"
+        "All new order calculations in the bot will immediately use the updated rate."
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+@require_bot_channel_and_admin
+async def setfx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update the operational SGD to MMK exchange rate."""
+    args = context.args
+    if not args:
+        current = get_current_fx_rate()
+        await update.message.reply_text(
+            f"ℹ️ **Current Operational Rate:** 1 SGD = **{current:,.0f} MMK**\n\n"
+            "To set a new rate, provide the MMK amount:\n"
+            "👉 `/setfx 3450`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        new_rate = float(args[0].replace(",", "").strip())
+        if new_rate < 1000 or new_rate > 10000:
+            await update.message.reply_text("⚠️ Rate must be between 1,000 and 10,000 MMK per SGD.", parse_mode="Markdown")
+            return
+
+        old_rate = get_current_fx_rate()
+        set_current_fx_rate(new_rate)
+
+        await update.message.reply_text(
+            f"✅ **Operational Exchange Rate Updated!**\n\n"
+            f"• **Previous Rate:** 1 SGD = {old_rate:,.0f} MMK\n"
+            f"• **New Rate:** 1 SGD = **{new_rate:,.0f} MMK**\n\n"
+            f"✨ All future order intakes will calculate at this rate.",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number. Please enter a valid rate, e.g. `/setfx 3450`", parse_mode="Markdown")
 
 
 async def clean_keyboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1098,6 +1177,8 @@ def main():
     app.add_handler(CommandHandler("updatestatus", update_status_command))
     app.add_handler(CommandHandler("cancelorder", cancel_order_command))
     app.add_handler(CommandHandler("editdeposit", editdeposit_command))
+    app.add_handler(CommandHandler(["fx", "rate", "rates"], fx_command))
+    app.add_handler(CommandHandler("setfx", setfx_command))
     app.add_handler(CommandHandler(["clean", "cleankeyboard", "clear"], clean_keyboard_command))
 
     # Menu text buttons matching MENU_REGEX

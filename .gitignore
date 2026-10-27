@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
-bot.py.bak
+bot.py.bak*
+fx_config.json
 mtni-bot.zip
 deploy-justrunmy/

@@ -13,7 +13,16 @@ os.environ["BOT_CHANNEL_ID"] = "-1004342732438"
 os.environ["BOT_CHANNEL_TOPIC_ID"] = "621"
 os.environ["ADMIN_IDS"] = "1753678802,8995849513,5065850640,6019728260"
 
-from bot import is_admin, is_allowed_topic, require_bot_channel_and_admin, clean_keyboard_command
+from bot import (
+    is_admin,
+    is_allowed_topic,
+    require_bot_channel_and_admin,
+    clean_keyboard_command,
+    fx_command,
+    setfx_command,
+    get_current_fx_rate,
+    set_current_fx_rate
+)
 
 def make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621):
     update = MagicMock()
@@ -22,6 +31,7 @@ def make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supe
     update.effective_chat.type = chat_type
     update.effective_message.message_thread_id = thread_id
     update.effective_message.reply_text = AsyncMock()
+    update.message = update.effective_message
     return update
 
 async def run_tests():
@@ -79,7 +89,34 @@ async def run_tests():
     assert isinstance(clean_kwargs.get("reply_markup"), ReplyKeyboardRemove)
     print("  ✅ Test 7: /clean command sends ReplyKeyboardRemove in any topic -> PASS")
 
-    print("\n🎉 ALL 7 TESTS PASSED SUCCESSFULLY!")
+    # Test 8: /fx command runs in Bot Channel topic 621
+    up_fx = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
+    await fx_command(up_fx, MagicMock())
+    assert up_fx.effective_message.reply_text.called
+    fx_msg = up_fx.effective_message.reply_text.call_args[0][0]
+    assert "Operational Exchange Rate" in fx_msg
+    print("  ✅ Test 8: /fx command shows operational rate in topic 621 -> PASS")
+
+    # Test 9: /setfx updates rate persistently
+    set_current_fx_rate(3450.0)
+    assert get_current_fx_rate() == 3450.0
+    up_setfx = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=621)
+    mock_ctx = MagicMock()
+    mock_ctx.args = ["3500"]
+    await setfx_command(up_setfx, mock_ctx)
+    assert get_current_fx_rate() == 3500.0
+    print("  ✅ Test 9: /setfx updates rate to 3500 dynamically -> PASS")
+
+    # Reset back to 3400 baseline
+    set_current_fx_rate(3400.0)
+
+    # Test 10: /setfx blocked outside topic 621
+    up_setfx_wrong = make_mock_update(user_id=1753678802, chat_id=-1004342732438, chat_type="supergroup", thread_id=34)
+    await setfx_command(up_setfx_wrong, mock_ctx)
+    assert get_current_fx_rate() == 3400.0, "Rate should NOT have changed in wrong topic"
+    print("  ✅ Test 10: /setfx blocked outside topic 621 -> PASS")
+
+    print("\n🎉 ALL 10 TESTS PASSED SUCCESSFULLY!")
 
 if __name__ == "__main__":
     asyncio.run(run_tests())
